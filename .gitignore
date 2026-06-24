@@ -10,3 +10,11 @@ outputs/*
 checkpoints/*.pt
 demo/backend/checkpoints/*.pt
 *.mp4
+
+# BIBM evaluation ipynb instances (cp 出来的，含 outputs)
+# 模板 eval_template.ipynb 进 git，每个实验单独 cp 出的 eval_<name>.ipynb 不进 git
+baseline/dataset_BUSI/eval_bibm_*.ipynb
+baseline/dataset_BUSI/eval_*_run*.ipynb
+
+# 实验输出目录 (训练 log / ckpt / tensorboard)
+runs/
