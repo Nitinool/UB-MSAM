@@ -93,11 +93,16 @@ EXP_NAME=bibm_design_multiplicative CUDA_VISIBLE_DEVICES=0,1,2,3 python training
 # 装依赖
 pip install monai
 
-# 4 个实验（顺序跑）
-CUDA_VISIBLE_DEVICES=0 python experiments/cross_backbone/train.py --backbone unet --exp-name bibm_e3_unet_baseline
-CUDA_VISIBLE_DEVICES=0 python experiments/cross_backbone/train.py --backbone unet --use-ubl --exp-name bibm_e3_unet_ubl
-CUDA_VISIBLE_DEVICES=0 python experiments/cross_backbone/train.py --backbone swin_unetr --exp-name bibm_e3_swin_baseline
-CUDA_VISIBLE_DEVICES=0 python experiments/cross_backbone/train.py --backbone swin_unetr --use-ubl --exp-name bibm_e3_swin_ubl
+# 推荐：4 张卡并行 4 个实验 (~2h 全完成)
+# 用 tmux 或 nohup 后台跑, 不会因 ssh 断开而中断:
+nohup bash -c "CUDA_VISIBLE_DEVICES=0 python experiments/cross_backbone/train.py --backbone unet --exp-name bibm_e3_unet_baseline" > logs/e3_unet_baseline.log 2>&1 &
+nohup bash -c "CUDA_VISIBLE_DEVICES=1 python experiments/cross_backbone/train.py --backbone unet --use-ubl --exp-name bibm_e3_unet_ubl" > logs/e3_unet_ubl.log 2>&1 &
+nohup bash -c "CUDA_VISIBLE_DEVICES=2 python experiments/cross_backbone/train.py --backbone swin_unetr --exp-name bibm_e3_swin_baseline" > logs/e3_swin_baseline.log 2>&1 &
+nohup bash -c "CUDA_VISIBLE_DEVICES=3 python experiments/cross_backbone/train.py --backbone swin_unetr --use-ubl --exp-name bibm_e3_swin_ubl" > logs/e3_swin_ubl.log 2>&1 &
+
+# 单实验 DDP 4 卡 (顺序跑 4 个, 总耗时 ~2h):
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 \
+    experiments/cross_backbone/train.py --backbone unet --exp-name bibm_e3_unet_baseline
 ```
 
 详见 `experiments/cross_backbone/README.md`。

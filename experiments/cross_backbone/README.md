@@ -21,32 +21,82 @@ MONAI 内置 UNet 和 SwinUNETR 实现。我们用 MONAI 是为了：
 
 ## 🚀 4 个实验命令
 
+支持单卡和 DDP 多卡。**Effective batch size = `--batch-size` × GPU 数**。
+
+### 方式 1：单卡顺序跑（最稳，~8h 总耗时）
+
 ```bash
 cd ~/jupyterworkspace/UB-MSAM
 conda activate sam22
 
-# 1. U-Net baseline (无 U-BLoss)
-CUDA_VISIBLE_DEVICES=0,1,2,3 python experiments/cross_backbone/train.py \
-    --backbone unet \
-    --exp-name bibm_e3_unet_baseline
+CUDA_VISIBLE_DEVICES=0 python experiments/cross_backbone/train.py \
+    --backbone unet --exp-name bibm_e3_unet_baseline
 
-# 2. U-Net + U-BLoss
-CUDA_VISIBLE_DEVICES=0,1,2,3 python experiments/cross_backbone/train.py \
-    --backbone unet --use-ubl \
-    --exp-name bibm_e3_unet_ubl
+CUDA_VISIBLE_DEVICES=0 python experiments/cross_backbone/train.py \
+    --backbone unet --use-ubl --exp-name bibm_e3_unet_ubl
 
-# 3. Swin-UNETR baseline
-CUDA_VISIBLE_DEVICES=0,1,2,3 python experiments/cross_backbone/train.py \
-    --backbone swin_unetr \
-    --exp-name bibm_e3_swin_baseline
+CUDA_VISIBLE_DEVICES=0 python experiments/cross_backbone/train.py \
+    --backbone swin_unetr --exp-name bibm_e3_swin_baseline
 
-# 4. Swin-UNETR + U-BLoss
-CUDA_VISIBLE_DEVICES=0,1,2,3 python experiments/cross_backbone/train.py \
-    --backbone swin_unetr --use-ubl \
-    --exp-name bibm_e3_swin_ubl
+CUDA_VISIBLE_DEVICES=0 python experiments/cross_backbone/train.py \
+    --backbone swin_unetr --use-ubl --exp-name bibm_e3_swin_ubl
 ```
 
-> 注：当前 `train.py` 只用单卡（CUDA_VISIBLE_DEVICES=0,1,2,3 只是告诉 PyTorch "可见这 4 张"，实际只用 0 号）。如果需要 DDP 多卡训练，告诉 Claude 扩。但 CNN 训练单卡 V100 已经够快了（BUSI 50 epoch ~2h）。
+### 方式 2：单进程 DDP 4 卡（每个实验更快，但要顺序跑 4 个）
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 \
+    experiments/cross_backbone/train.py \
+    --backbone unet --exp-name bibm_e3_unet_baseline
+
+# 单个实验从 ~2h 缩到 ~30min, 4 个顺序跑约 2h 总耗时
+```
+
+⚠️ **DDP effective batch size**：默认 `--batch-size 4` × 4 卡 = 16（每张卡仍是 4）。如果想保持总 batch=4 用于公平对比，传 `--batch-size 1`。
+
+### 方式 3：4 进程并行 4 张卡（推荐，~2h 总耗时）
+
+每个 GPU 跑一个实验，互不干扰，最快出全部结果。
+
+```bash
+# 用 tmux 或 nohup 开 4 个后台进程
+tmux new -s e3
+# Ctrl+B " 横分; Ctrl+B % 纵分; 4 个 pane 分别跑:
+
+# Pane 0: GPU 0
+CUDA_VISIBLE_DEVICES=0 python experiments/cross_backbone/train.py \
+    --backbone unet --exp-name bibm_e3_unet_baseline
+
+# Pane 1: GPU 1
+CUDA_VISIBLE_DEVICES=1 python experiments/cross_backbone/train.py \
+    --backbone unet --use-ubl --exp-name bibm_e3_unet_ubl
+
+# Pane 2: GPU 2
+CUDA_VISIBLE_DEVICES=2 python experiments/cross_backbone/train.py \
+    --backbone swin_unetr --exp-name bibm_e3_swin_baseline
+
+# Pane 3: GPU 3
+CUDA_VISIBLE_DEVICES=3 python experiments/cross_backbone/train.py \
+    --backbone swin_unetr --use-ubl --exp-name bibm_e3_swin_ubl
+
+# Ctrl+B d detach 离开, 2h 后 tmux attach -t e3 看结果
+```
+
+或者用 nohup：
+
+```bash
+mkdir -p logs
+nohup bash -c "CUDA_VISIBLE_DEVICES=0 python experiments/cross_backbone/train.py --backbone unet --exp-name bibm_e3_unet_baseline" > logs/e3_unet_baseline.log 2>&1 &
+nohup bash -c "CUDA_VISIBLE_DEVICES=1 python experiments/cross_backbone/train.py --backbone unet --use-ubl --exp-name bibm_e3_unet_ubl" > logs/e3_unet_ubl.log 2>&1 &
+nohup bash -c "CUDA_VISIBLE_DEVICES=2 python experiments/cross_backbone/train.py --backbone swin_unetr --exp-name bibm_e3_swin_baseline" > logs/e3_swin_baseline.log 2>&1 &
+nohup bash -c "CUDA_VISIBLE_DEVICES=3 python experiments/cross_backbone/train.py --backbone swin_unetr --use-ubl --exp-name bibm_e3_swin_ubl" > logs/e3_swin_ubl.log 2>&1 &
+
+# 查看进度
+tail -f logs/e3_unet_ubl.log
+nvidia-smi
+```
+
+> 💡 **推荐方式 3**：4 个实验 2h 全完成，比 DDP 简单，不会卡死。
 
 ---
 

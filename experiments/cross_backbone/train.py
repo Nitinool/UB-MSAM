@@ -1,20 +1,16 @@
 """
-BIBM E3: Cross-backbone training script.
+BIBM E3: Cross-backbone training script with DDP support.
 
 跑 U-Net 或 Swin-UNETR，可选叠加 U-BLoss，用于证明 U-BLoss 是 backbone-agnostic 的训练目标 (回应 R2.2)。
 
-用法 (在 ~/jupyterworkspace/UB-MSAM/ 下):
-    # U-Net baseline (无 U-BLoss)
-    python experiments/cross_backbone/train.py --backbone unet --exp-name bibm_e3_unet_baseline
+支持单卡和多卡 DDP：
+    # 单卡 (用 CUDA_VISIBLE_DEVICES 指定显卡)
+    CUDA_VISIBLE_DEVICES=0 python experiments/cross_backbone/train.py \
+        --backbone unet --exp-name bibm_e3_unet_baseline
 
-    # U-Net + U-BLoss
-    python experiments/cross_backbone/train.py --backbone unet --use-ubl --exp-name bibm_e3_unet_ubl
-
-    # Swin-UNETR baseline
-    python experiments/cross_backbone/train.py --backbone swin_unetr --exp-name bibm_e3_swin_baseline
-
-    # Swin-UNETR + U-BLoss
-    python experiments/cross_backbone/train.py --backbone swin_unetr --use-ubl --exp-name bibm_e3_swin_ubl
+    # 4 卡 DDP (用 torchrun)
+    CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 \
+        experiments/cross_backbone/train.py --backbone unet --exp-name bibm_e3_unet_baseline
 
 输出: ./runs/<exp_name>/{checkpoint.pt, train.log, config.json}
 依赖: monai (pip install monai)
@@ -30,23 +26,52 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, DistributedSampler
 from tqdm import tqdm
+
+
+# =============================================================================
+# DDP 工具
+# =============================================================================
+def setup_ddp():
+    """根据环境变量初始化 DDP. 单卡运行时返回 (False, 0, 1)."""
+    if 'WORLD_SIZE' not in os.environ:
+        return False, 0, 1  # 单卡
+
+    world_size = int(os.environ['WORLD_SIZE'])
+    rank = int(os.environ['RANK'])
+    local_rank = int(os.environ['LOCAL_RANK'])
+
+    dist.init_process_group(backend='nccl', init_method='env://')
+    torch.cuda.set_device(local_rank)
+    return True, rank, world_size
+
+
+def cleanup_ddp():
+    if dist.is_initialized():
+        dist.destroy_process_group()
+
+
+def is_main_process(rank):
+    return rank == 0
+
+
+def reduce_mean(tensor, world_size):
+    """跨进程求平均."""
+    rt = tensor.clone()
+    dist.all_reduce(rt, op=dist.ReduceOp.SUM)
+    return rt / world_size
 
 
 # =============================================================================
 # 数据集 (BUSI, 复用 SAM2 的目录结构)
 # =============================================================================
 class BUSIDataset(Dataset):
-    """BUSI 数据集. 目录结构:
-        root/
-            JPEGImages/<name>/00000.jpg
-            Annotations/<name>/00000.png
-            ImageSets/train.txt (一行一个 name)
-    """
-    def __init__(self, root, split_txt, size=1024, augment=True):
+    def __init__(self, root, split_txt, size=1024, augment=True, verbose=True):
         self.root = root
         self.size = size
         self.augment = augment
@@ -56,7 +81,8 @@ class BUSIDataset(Dataset):
         self.gt_dir = os.path.join(root, "Annotations")
         # 训练时过滤掉空 mask 的样本 (BUSI normal 已被剔除, 但保险起见)
         self.names = [n for n in self.names if self._has_lesion(n)]
-        print(f"Dataset: {len(self.names)} samples loaded from {split_txt}")
+        if verbose:
+            print(f"Dataset: {len(self.names)} samples loaded from {split_txt}")
 
     def _has_lesion(self, name):
         gt_path = os.path.join(self.gt_dir, name, "00000.png")
@@ -77,19 +103,16 @@ class BUSIDataset(Dataset):
         img = cv2.resize(img, (self.size, self.size), interpolation=cv2.INTER_LINEAR)
         gt = cv2.resize(gt, (self.size, self.size), interpolation=cv2.INTER_NEAREST)
 
-        # ImageNet 标准化
         img = img.astype(np.float32) / 255.0
         img = (img - np.array([0.485, 0.456, 0.406])) / np.array([0.229, 0.224, 0.225])
         gt = (gt > 127).astype(np.float32)
 
         img_t = torch.from_numpy(img.transpose(2, 0, 1)).float()
-        gt_t = torch.from_numpy(gt).float().unsqueeze(0)  # [1, H, W]
+        gt_t = torch.from_numpy(gt).float().unsqueeze(0)
 
-        if self.augment:
-            # 简单的水平翻转
-            if np.random.rand() < 0.5:
-                img_t = torch.flip(img_t, dims=[2])
-                gt_t = torch.flip(gt_t, dims=[2])
+        if self.augment and np.random.rand() < 0.5:
+            img_t = torch.flip(img_t, dims=[2])
+            gt_t = torch.flip(gt_t, dims=[2])
 
         return img_t, gt_t
 
@@ -123,37 +146,24 @@ def build_model(backbone: str, img_size: int):
 
 
 # =============================================================================
-# U-BLoss (inline 实现, 与 training/loss_fns.py 中的逻辑完全一致)
-# 行为对应论文 main 设置: boundary_restriction=True, stop_gradient=True, additive=True
+# U-BLoss
 # =============================================================================
 def uncertainty_guided_boundary_loss_v2(pred_logits, gt_mask, eps=1e-6):
-    """
-    Args:
-        pred_logits: [N, 1, H, W] 模型 logits 输出
-        gt_mask: [N, 1, H, W] GT (0/1)
-    Returns:
-        scalar loss
-    """
-    # 1. 计算熵 (predictive uncertainty)
     prob = torch.sigmoid(pred_logits)
     prob_c = torch.clamp(prob, eps, 1 - eps)
     entropy = -prob_c * torch.log2(prob_c) - (1 - prob_c) * torch.log2(1 - prob_c)
-    # stop-gradient: 熵不参与 backprop
     entropy = entropy.detach()
 
-    # 2. 用 Sobel 提取边界 mask
     sobel_kernel = torch.tensor(
         [[-1, -1, -1], [-1, 8, -1], [-1, -1, -1]],
         dtype=torch.float32, device=gt_mask.device
     ).view(1, 1, 3, 3)
     boundary = F.conv2d(gt_mask, sobel_kernel, padding=1)
-    boundary = (boundary.abs() > 0.1).float()  # [N, 1, H, W]
+    boundary = (boundary.abs() > 0.1).float()
 
-    # 3. 加权 BCE: (1 + H) · BCE, 仅在边界上
     bce = F.binary_cross_entropy_with_logits(pred_logits, gt_mask, reduction='none')
     weighted = (1.0 + entropy) * bce * boundary
 
-    # 4. 在边界像素上 average
     loss = weighted.sum() / (boundary.sum() + eps)
     return loss
 
@@ -166,7 +176,6 @@ def dice_loss(pred_logits, gt_mask, eps=1.0):
 
 
 def compute_loss(pred_logits, gt_mask, use_ubl: bool, ubl_weight: float = 2.0):
-    """组合损失: BCE + Dice (+ U-BLoss)"""
     bce = F.binary_cross_entropy_with_logits(pred_logits, gt_mask)
     dice = dice_loss(pred_logits, gt_mask)
     loss = bce + dice
@@ -189,7 +198,7 @@ def main():
         '--dataset-root',
         default='/home/zhengsongming/jupyterworkspace/datasets/BUSI_for_SAM2',
     )
-    parser.add_argument('--batch-size', type=int, default=4)
+    parser.add_argument('--batch-size', type=int, default=4, help='per-GPU batch size')
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--weight-decay', type=float, default=0.01)
@@ -198,59 +207,98 @@ def main():
     parser.add_argument('--seed', type=int, default=42)
     args = parser.parse_args()
 
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
+    # === DDP 初始化 ===
+    use_ddp, rank, world_size = setup_ddp()
+    is_main = is_main_process(rank)
 
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f"Device: {device}")
-    if device == 'cuda':
-        print(f"GPU: {torch.cuda.get_device_name(0)}")
+    torch.manual_seed(args.seed + rank)
+    np.random.seed(args.seed + rank)
 
-    # 输出目录 (与 SAM2 训练保持一致的位置: ./runs/<exp_name>/)
+    if use_ddp:
+        local_rank = int(os.environ['LOCAL_RANK'])
+        device = torch.device(f'cuda:{local_rank}')
+    else:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    if is_main:
+        print(f"Device: {device}, DDP: {use_ddp}, world_size: {world_size}")
+        if device.type == 'cuda':
+            print(f"GPU: {torch.cuda.get_device_name(device)}")
+
+    # === 输出目录 ===
     output_dir = Path('runs') / args.exp_name
-    (output_dir / 'checkpoints').mkdir(parents=True, exist_ok=True)
-    with open(output_dir / 'config.json', 'w') as f:
-        json.dump(vars(args), f, indent=2)
-    print(f"Output dir: {output_dir}")
+    if is_main:
+        (output_dir / 'checkpoints').mkdir(parents=True, exist_ok=True)
+        with open(output_dir / 'config.json', 'w') as f:
+            cfg = vars(args).copy()
+            cfg['use_ddp'] = use_ddp
+            cfg['world_size'] = world_size
+            json.dump(cfg, f, indent=2)
+        print(f"Output dir: {output_dir}")
 
-    # 数据集
+    # === 数据集 ===
     train_set = BUSIDataset(
         args.dataset_root,
         os.path.join(args.dataset_root, 'ImageSets', 'train.txt'),
-        size=args.size, augment=True,
-    )
-    train_loader = DataLoader(
-        train_set, batch_size=args.batch_size, shuffle=True,
-        num_workers=args.num_workers, pin_memory=True, drop_last=True,
+        size=args.size, augment=True, verbose=is_main,
     )
 
-    # 模型
+    if use_ddp:
+        sampler = DistributedSampler(train_set, num_replicas=world_size, rank=rank, shuffle=True)
+        train_loader = DataLoader(
+            train_set, batch_size=args.batch_size, sampler=sampler,
+            num_workers=args.num_workers, pin_memory=True, drop_last=True,
+        )
+    else:
+        sampler = None
+        train_loader = DataLoader(
+            train_set, batch_size=args.batch_size, shuffle=True,
+            num_workers=args.num_workers, pin_memory=True, drop_last=True,
+        )
+
+    # === 模型 ===
     model = build_model(args.backbone, args.size).to(device)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Trainable params: {n_params / 1e6:.2f} M")
-    print(f"Use U-BLoss: {args.use_ubl} (weight={args.ubl_weight})")
+    if is_main:
+        print(f"Trainable params: {n_params / 1e6:.2f} M")
+        print(f"Use U-BLoss: {args.use_ubl} (weight={args.ubl_weight})")
+
+    if use_ddp:
+        model = DDP(model, device_ids=[local_rank], output_device=local_rank)
 
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
 
-    # log file
-    log_path = output_dir / 'train.log'
-    log_file = open(log_path, 'w')
-
-    def log(msg):
-        print(msg)
-        log_file.write(msg + '\n')
-        log_file.flush()
+    # === log file (只在 rank 0 写) ===
+    if is_main:
+        log_file = open(output_dir / 'train.log', 'w')
+        def log(msg):
+            print(msg)
+            log_file.write(msg + '\n')
+            log_file.flush()
+    else:
+        def log(msg):
+            pass
 
     log(f"=== Training start ===")
     log(f"Args: {json.dumps(vars(args), indent=2)}")
+    log(f"DDP: {use_ddp}, world_size: {world_size}, effective batch size: {args.batch_size * world_size}")
     log(f"Trainable params: {n_params / 1e6:.2f} M")
 
     for epoch in range(args.epochs):
         model.train()
+        if sampler is not None:
+            sampler.set_epoch(epoch)  # DDP 必需, 确保每 epoch shuffle 不同
+
         losses = []
         bce_losses, dice_losses = [], []
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs}")
+
+        # rank 0 显示 tqdm, 其他 rank 安静
+        if is_main:
+            pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs}")
+        else:
+            pbar = train_loader
+
         for img, gt in pbar:
             img, gt = img.to(device, non_blocking=True), gt.to(device, non_blocking=True)
             pred = model(img)
@@ -263,27 +311,43 @@ def main():
             losses.append(loss.item())
             bce_losses.append(parts['bce'])
             dice_losses.append(parts['dice'])
-            pbar.set_postfix(loss=f"{loss.item():.4f}", bce=f"{parts['bce']:.3f}", dice=f"{parts['dice']:.3f}")
+
+            if is_main:
+                pbar.set_postfix(loss=f"{loss.item():.4f}", bce=f"{parts['bce']:.3f}", dice=f"{parts['dice']:.3f}")
 
         scheduler.step()
+
+        # 跨进程聚合 loss 用于日志
+        mean_loss = np.mean(losses)
+        if use_ddp:
+            loss_tensor = torch.tensor(mean_loss, device=device)
+            mean_loss = reduce_mean(loss_tensor, world_size).item()
+
         msg = (
             f"Epoch {epoch+1}/{args.epochs} | "
-            f"loss={np.mean(losses):.4f} | bce={np.mean(bce_losses):.4f} | "
+            f"loss={mean_loss:.4f} | bce={np.mean(bce_losses):.4f} | "
             f"dice={np.mean(dice_losses):.4f} | lr={optimizer.param_groups[0]['lr']:.2e}"
         )
         log(msg)
 
-        # 每个 epoch 都保存（覆盖最新的）
-        ckpt_path = output_dir / 'checkpoints' / 'checkpoint.pt'
-        torch.save({
-            'epoch': epoch + 1,
-            'model': model.state_dict(),
-            'args': vars(args),
-        }, ckpt_path)
+        # 只在 rank 0 保存 checkpoint
+        if is_main:
+            ckpt_path = output_dir / 'checkpoints' / 'checkpoint.pt'
+            # 去掉 DDP 的 .module wrapper
+            state_dict = model.module.state_dict() if use_ddp else model.state_dict()
+            torch.save({
+                'epoch': epoch + 1,
+                'model': state_dict,
+                'args': vars(args),
+            }, ckpt_path)
 
-    log(f"=== Training done. Final ckpt: {ckpt_path} ===")
-    log_file.close()
-    print(f"\n✅ Done. Checkpoint at: {ckpt_path}")
+    log(f"=== Training done. Final ckpt: {output_dir / 'checkpoints' / 'checkpoint.pt'} ===")
+
+    if is_main:
+        log_file.close()
+        print(f"\n[OK] Done. Checkpoint at: {output_dir / 'checkpoints' / 'checkpoint.pt'}")
+
+    cleanup_ddp()
 
 
 if __name__ == '__main__':
