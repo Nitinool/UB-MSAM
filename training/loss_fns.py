@@ -21,15 +21,24 @@ def uncertainty_guided_boundary_loss(
     pred_masks_logits,  # 形状: [N, M, H, W]
     gt_masks,           # 形状: [N, M, H, W] (已被扩展)
     uncertainty_map,    # 形状: [N, M, H, W]
-    num_objects
+    num_objects,
+    use_boundary_restriction: bool = True,   # E-design: 是否仅在边界上聚合 (论文 default=True)
+    use_stop_gradient: bool = True,          # E-design: 熵项是否 stop-gradient (论文 default=True)
+    additive_form: bool = True,              # E-design: (1+H)·BCE 或乘性 H·BCE (论文 default=True)
 ):
     """
     计算不确定性引导的边界损失 (U-BL).
     这个修正后的版本会为每个候选掩码返回一个损失值。
+
+    三个开关用于 BIBM 改稿的 E-design ablation (回应 R3.4 新颖性质疑):
+      - use_boundary_restriction=False: 不限定边界，全图加权
+      - use_stop_gradient=False: 熵项参与梯度回传 (会触发 trivial confidence collapse)
+      - additive_form=False: 使用乘性 H·BCE 而非加性 (1+H)·BCE
+    论文 main 设置: 三者都 True
     """
     # 1. 从真实掩码(GT)中提取边界。
     sobel_kernel = torch.tensor([[-1,-1,-1],[-1,8,-1],[-1,-1,-1]], dtype=torch.float32, device=gt_masks.device).view(1,1,3,3)
-    
+
     # 和上次一样，处理可能的3通道输入
     if gt_masks.shape[1] == 3:
          # 注意：这里我们假设所有M个掩码通道都是一样的，所以只取第一个GT通道来做边界
@@ -51,20 +60,32 @@ def uncertainty_guided_boundary_loss(
     gt_boundary = gt_boundary_conv_out.reshape(n, m, h, w)
     gt_boundary = (gt_boundary > 0.1).float()
 
+    # E-design 开关 1: boundary restriction
+    # 若关闭，则把 mask 全设为 1 (全图加权)
+    if not use_boundary_restriction:
+        gt_boundary = torch.ones_like(gt_boundary)
+
     # 2. 计算逐像素的损失图
     per_pixel_loss_map = F.binary_cross_entropy_with_logits(
         pred_masks_logits, gt_masks, reduction='none'
     )
     boundary_loss_map = per_pixel_loss_map * gt_boundary
 
+    # E-design 开关 2: stop-gradient on entropy
+    H = uncertainty_map.detach() if use_stop_gradient else uncertainty_map
+
     # 3. 应用不确定性权重
-    weighted_loss_map = (1 + uncertainty_map.detach()) * boundary_loss_map
+    # E-design 开关 3: additive (1+H)·BCE  vs  multiplicative H·BCE
+    if additive_form:
+        weighted_loss_map = (1 + H) * boundary_loss_map
+    else:
+        weighted_loss_map = H * boundary_loss_map
 
     # 4. --- 核心修改在这里 ---
     #    我们不再对所有维度求和，而是只对空间维度(H, W)求和，
     #    保留批次(N)和多掩码(M)的维度。
     loss_per_mask = weighted_loss_map.flatten(2).sum(-1) / (gt_boundary.flatten(2).sum(-1) + 1e-6)
-    
+
     # 最终返回一个形状为 [N, M] 的张量
     # 修改了一下返回值的缩放 return (loss_per_mask / num_objects
     return (loss_per_mask / num_objects) / 100.0
@@ -190,6 +211,10 @@ class MultiStepMultiMasksAndIous_UBL(nn.Module):
         pred_obj_scores=False,
         focal_gamma_obj_score=0.0,
         focal_alpha_obj_score=-1,
+        # BIBM E-design ablation 开关 (论文 main 设置: 三者都 True)
+        ubl_use_boundary_restriction: bool = True,
+        ubl_use_stop_gradient: bool = True,
+        ubl_additive_form: bool = True,
     ):
         """
         This class computes the multi-step multi-mask and IoU losses.
@@ -202,6 +227,9 @@ class MultiStepMultiMasksAndIous_UBL(nn.Module):
             pred_obj_scores: if True, compute loss for object scores
             focal_gamma_obj_score: gamma for sigmoid focal loss on object scores
             focal_alpha_obj_score: alpha for sigmoid focal loss on object scores
+            ubl_use_boundary_restriction: E-design 开关 1, False=全图加权
+            ubl_use_stop_gradient: E-design 开关 2, False=熵项参与梯度回传
+            ubl_additive_form: E-design 开关 3, False=乘性 H·BCE
         """
 
         super().__init__()
@@ -219,6 +247,11 @@ class MultiStepMultiMasksAndIous_UBL(nn.Module):
         self.supervise_all_iou = supervise_all_iou
         self.iou_use_l1_loss = iou_use_l1_loss
         self.pred_obj_scores = pred_obj_scores
+
+        # BIBM E-design 开关
+        self.ubl_use_boundary_restriction = ubl_use_boundary_restriction
+        self.ubl_use_stop_gradient = ubl_use_stop_gradient
+        self.ubl_additive_form = ubl_additive_form
 
     def forward(self, outs_batch: List[Dict], targets_batch: torch.Tensor):
         assert len(outs_batch) == len(targets_batch)
@@ -306,7 +339,10 @@ class MultiStepMultiMasksAndIous_UBL(nn.Module):
         # 注意：这里的实现为了简化，我们对所有多掩码输出都计算U-BL
         # 在选择最佳掩码后，我们只使用对应那个掩码的损失
         loss_multi_ubl = uncertainty_guided_boundary_loss(
-            src_masks, target_masks, entropy_map, num_objects
+            src_masks, target_masks, entropy_map, num_objects,
+            use_boundary_restriction=self.ubl_use_boundary_restriction,
+            use_stop_gradient=self.ubl_use_stop_gradient,
+            additive_form=self.ubl_additive_form,
         )
         # 确保 loss_multi_ubl 的形状是 [N, M]
         assert loss_multi_ubl.dim() == 2
