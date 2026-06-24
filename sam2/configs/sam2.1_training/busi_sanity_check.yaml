@@ -1,16 +1,16 @@
 # @package _global_
-#03医学图像分割/sam2/sam2/configs/sam2.1_training/sam2.1_hiera_b+_MOSE_finetune.yaml
+# Sanity check: BUSI + Adapter + U-BLoss 只跑 2 个 epoch，验证 pipeline 通畅
 
 scratch:
-  resolution: 1024  ##origin 1024只能设置batchsize 3
-  train_batch_size: 3  ## 1 2 3
+  resolution: 1024
+  train_batch_size: 3
   num_train_workers: 10
-  num_frames: 1  ##
-  max_num_objects: 1  ##
+  num_frames: 1
+  max_num_objects: 1
   base_lr: 5.0e-6
   vision_lr: 3.0e-06
   phases_per_epoch: 1
-  num_epochs: 50
+  num_epochs: 2   # sanity check 用
 
 
 dataset: ###
@@ -344,9 +344,8 @@ trainer:
 launcher:
   num_nodes: 1
   gpus_per_node: 8
-  # 通过环境变量 EXP_NAME 指定本次实验名，每次跑新实验改 EXP_NAME 即可
-  # 默认 busi_adapter_bLoss_default，输出在 ./runs/<EXP_NAME>
-  experiment_log_dir: ./runs/${oc.env:EXP_NAME,busi_adapter_bLoss_default}
+  # 通过环境变量 EXP_NAME 指定本次实验名；默认 sanity_check_<时间>
+  experiment_log_dir: ./runs/${oc.env:EXP_NAME,sanity_check}
 
 # SLURM args if running on a cluster
 submitit:
