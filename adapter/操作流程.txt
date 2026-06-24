@@ -1,0 +1,11 @@
+
+1 定义adapter结构
+
+2 在image_encoder里面sam2/modeling/backbones/hieradet.py插入adapter结构
+
+3 在trainer里面修改和冻结不需要更新的参数
+
+
+
+
+CUDA_VISIBLE_DEVICES=1,2,3 python training/train.py     -c configs/sam2.1_training/busi_adapter_finetune.yaml     --use-cluster 0  --num-gpus 3

@@ -1,0 +1,1 @@
+python training/train.py -c configs/sam2.1_training/busi_finetune_direct.yaml --use-cluster 0    --num-gpus 4 # 根据您的GPU数量修改
