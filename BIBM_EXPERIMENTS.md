@@ -14,8 +14,10 @@
 | 🔴 P0 | E-design v3 | multiplicative `H·BCE` | 训 (`busi_ablation_multiplicative.yaml`) | eval_bibm_design_multiplicative.ipynb | ~3h 训 + 30 min 评 |
 | 🔴 P0 | E4 zero-shot | SAM2 on Kvasir-SEG | ❌ 纯推理 | (新建) eval_bibm_e4_sam2_on_kvasir.ipynb | 30 min |
 | 🔴 P0 | E4 zero-shot | MedSAM2 on Kvasir-SEG | ❌ 纯推理 | (新建) eval_bibm_e4_medsam2_on_kvasir.ipynb | 30 min |
-| 🟡 P1 | E3 跨 backbone | U-Net + U-BLoss | ✅ 训独立脚本 | (新建) eval_bibm_e3_unet_ubl.ipynb | ~半天 |
-| 🟡 P1 | E3 跨 backbone | Swin-Unet + U-BLoss | ✅ 训独立脚本 | (新建) eval_bibm_e3_swin_ubl.ipynb | ~半天 |
+| 🟡 P1 | E3 跨 backbone | U-Net + U-BLoss | ✅ `experiments/cross_backbone/train.py` | (新建) eval_bibm_e3_unet_ubl.ipynb | ~2h 训 + 30 min 评 |
+| 🟡 P1 | E3 跨 backbone | Swin-Unet + U-BLoss | ✅ `experiments/cross_backbone/train.py` | (新建) eval_bibm_e3_swin_ubl.ipynb | ~2h 训 + 30 min 评 |
+| 🟡 P1 | E3 跨 backbone | U-Net baseline | ✅ `experiments/cross_backbone/train.py` | (新建) eval_bibm_e3_unet_baseline.ipynb | ~2h 训 + 30 min 评 |
+| 🟡 P1 | E3 跨 backbone | Swin-Unet baseline | ✅ `experiments/cross_backbone/train.py` | (新建) eval_bibm_e3_swin_baseline.ipynb | ~2h 训 + 30 min 评 |
 | 🟢 P2 | E-baseline | SAM-Adapter | ✅ 装外部仓库 | 后定 | 1-2 天 |
 | 🟢 P2 | E-baseline | Medical SAM Adapter | ✅ 装外部仓库 | 后定 | 1-2 天 |
 
@@ -36,27 +38,34 @@ main_bibm.tex
 
 ## 🛠️ 评测 ipynb 工作流
 
-模板：`baseline/dataset_BUSI/eval_template.ipynb`
+两个评测模板：
+- `baseline/dataset_BUSI/eval_template.ipynb` — **SAM2** 评测模板（需要 box prompt）
+- `baseline/dataset_BUSI/eval_template_cnn.ipynb` — **CNN** 评测模板（无 prompt，用于 E3 U-Net / Swin-UNETR）
 
 **每跑完一个实验，做这三步**：
 
 ```bash
-# 1. 复制模板（不进 git）
+# 1. 复制对应模板（不进 git）
 cd ~/jupyterworkspace/UB-MSAM/baseline/dataset_BUSI/
+
+# SAM2 实验：
 cp eval_template.ipynb eval_bibm_design_no_boundary.ipynb
 
-# 2. 改第一处 ckpt 路径（其他都不动）
-# SAM2_CHECKPOINT_PATH = "/home/.../UB-MSAM/runs/bibm_design_no_boundary/checkpoints/checkpoint.pt"
+# E3 CNN 实验：
+cp eval_template_cnn.ipynb eval_bibm_e3_unet_ubl.ipynb
+
+# 2. 改 ckpt 路径（SAM2 模板改一行，CNN 模板改两行: BACKBONE 和 CKPT_PATH）
 
 # 3. 跑这个 cell → 得到 final_summary 表
-jupyter notebook eval_bibm_design_no_boundary.ipynb
 ```
 
-**eval_*.ipynb 都在 .gitignore 里**，不进 git，不会冲突。
+**eval_bibm_*.ipynb 都在 .gitignore 里**，不进 git，不会冲突。
 
 ---
 
 ## 🚀 训练命令模板
+
+### E-design (SAM2 + Adapter)
 
 ```bash
 cd ~/jupyterworkspace/UB-MSAM
@@ -77,6 +86,21 @@ EXP_NAME=bibm_design_multiplicative CUDA_VISIBLE_DEVICES=0,1,2,3 python training
     -c configs/sam2.1_training/busi_ablation_multiplicative.yaml \
     --use-cluster 0 --num-gpus 4
 ```
+
+### E3 (Cross-backbone, 用 MONAI U-Net / Swin-UNETR)
+
+```bash
+# 装依赖
+pip install monai
+
+# 4 个实验（顺序跑）
+CUDA_VISIBLE_DEVICES=0 python experiments/cross_backbone/train.py --backbone unet --exp-name bibm_e3_unet_baseline
+CUDA_VISIBLE_DEVICES=0 python experiments/cross_backbone/train.py --backbone unet --use-ubl --exp-name bibm_e3_unet_ubl
+CUDA_VISIBLE_DEVICES=0 python experiments/cross_backbone/train.py --backbone swin_unetr --exp-name bibm_e3_swin_baseline
+CUDA_VISIBLE_DEVICES=0 python experiments/cross_backbone/train.py --backbone swin_unetr --use-ubl --exp-name bibm_e3_swin_ubl
+```
+
+详见 `experiments/cross_backbone/README.md`。
 
 ---
 
