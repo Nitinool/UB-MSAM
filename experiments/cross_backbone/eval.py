@@ -33,7 +33,7 @@ from tqdm import tqdm
 # 让脚本能直接 import common
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (DATASET_ROOTS, SegDataset, build_model_scratch, build_model_pretrained,
-                    calculate_metrics, get_runs_dir)
+                    calculate_metrics, get_runs_dir, load_model_from_ckpt)
 
 
 def main():
@@ -48,19 +48,10 @@ def main():
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # === 从 ckpt 里读训练时的 args, 自动判断 model_type / backbone ===
+    # === 从 ckpt 加载模型 (自动判断 model_type, 兼容旧 ckpt) ===
     print(f"Loading ckpt: {args.ckpt}")
-    ckpt = torch.load(args.ckpt, map_location='cpu', weights_only=False)
-    ckpt_args = ckpt.get('args', {})
-    backbone = ckpt_args.get('backbone')
-    model_type = ckpt_args.get('model_type', 'pretrained')  # scratch 或 pretrained
-    print(f"  backbone={backbone}, model_type={model_type}, epoch={ckpt.get('epoch', '?')}")
-
-    if model_type == 'scratch':
-        model = build_model_scratch(backbone, args.size)
-    else:
-        model = build_model_pretrained(backbone, args.size)
-    model.load_state_dict(ckpt['model'])
+    model, backbone, model_type, _use_ubl, epoch = load_model_from_ckpt(args.ckpt, args.size)
+    print(f"  backbone={backbone}, model_type={model_type}, epoch={epoch}")
     model = model.to(device).eval()
 
     # === 加载评测集 ===
@@ -135,7 +126,7 @@ def main():
             'split': args.split,
             'backbone': backbone,
             'model_type': model_type,
-            'epoch': ckpt.get('epoch'),
+            'epoch': epoch,
             'overall': {k: float(v) if v is not None and not (isinstance(v, float) and np.isnan(v)) else None
                         for k, v in overall.items() if k != 'Category'},
             'per_sample': results,

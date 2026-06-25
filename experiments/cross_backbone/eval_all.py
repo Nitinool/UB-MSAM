@@ -27,25 +27,15 @@ from tqdm import tqdm
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (DATASET_ROOTS, SegDataset, build_model_scratch, build_model_pretrained,
-                    calculate_metrics, get_runs_dir)
+                    calculate_metrics, get_runs_dir, load_model_from_ckpt)
 
 
 def evaluate_ckpt(ckpt_path, dataset_root, split='val', size=1024):
-    """评测单个 ckpt, 返回 metrics dict."""
+    """评测单个 ckpt, 返回 metrics dict. 自动判断 scratch/pretrained."""
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
-    ckpt_args = ckpt.get('args', {})
-    backbone = ckpt_args.get('backbone')
-    model_type = ckpt_args.get('model_type', 'pretrained')
-    use_ubl = ckpt_args.get('use_ubl', False)
-    epoch = ckpt.get('epoch', '?')
-
-    if model_type == 'scratch':
-        model = build_model_scratch(backbone, size)
-    else:
-        model = build_model_pretrained(backbone, size)
-    model.load_state_dict(ckpt['model'])
+    # 自动判断 model_type, 兼容旧 ckpt
+    model, backbone, model_type, use_ubl, epoch = load_model_from_ckpt(ckpt_path, size)
     model = model.to(device).eval()
 
     eval_set = SegDataset(dataset_root, split=split, size=size, augment=False, verbose=False)

@@ -136,6 +136,48 @@ def build_model_pretrained(backbone, img_size):
     raise ValueError(f"Unknown backbone: {backbone}")
 
 
+def load_model_from_ckpt(ckpt_path, size=1024):
+    """从 ckpt 加载模型, 自动判断 model_type (兼容重构前的旧 ckpt).
+
+    旧 ckpt (重构前 train.py) 的 args 里没有 model_type 字段, 会尝试
+    scratch 和 pretrained 两种 build, 哪个 load_state_dict 成功用哪个.
+
+    Returns: (model, backbone, model_type, use_ubl, epoch)
+    """
+    ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+    ckpt_args = ckpt.get('args', {})
+    backbone = ckpt_args.get('backbone')
+    model_type = ckpt_args.get('model_type')  # 旧 ckpt 为 None
+    use_ubl = ckpt_args.get('use_ubl', False)
+    epoch = ckpt.get('epoch', '?')
+
+    if backbone is None:
+        raise ValueError(f"ckpt args 里没有 backbone 字段. ckpt_args={ckpt_args}")
+
+    # 已知 model_type: 直接加载
+    if model_type is not None:
+        if model_type == 'scratch':
+            model = build_model_scratch(backbone, size)
+        else:
+            model = build_model_pretrained(backbone, size)
+        model.load_state_dict(ckpt['model'])
+        return model, backbone, model_type, use_ubl, epoch
+
+    # 旧 ckpt 没有 model_type: 尝试两种 build, 哪个 state_dict 匹配哪个
+    for mt, build_fn in [('scratch', build_model_scratch),
+                         ('pretrained', build_model_pretrained)]:
+        try:
+            model = build_fn(backbone, size)
+            model.load_state_dict(ckpt['model'])  # strict=True, 不匹配会 raise
+            return model, backbone, mt, use_ubl, epoch
+        except (RuntimeError, KeyError):
+            continue
+    raise ValueError(
+        f"Cannot load ckpt {ckpt_path}: backbone={backbone}, "
+        f"tried both scratch and pretrained, both state_dict mismatched"
+    )
+
+
 # =============================================================================
 # 损失 (与 SAM2 训练框架中的 U-BLoss 实现一致)
 # =============================================================================
