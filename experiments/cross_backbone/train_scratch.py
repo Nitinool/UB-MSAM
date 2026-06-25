@@ -22,7 +22,8 @@ import argparse
 import json
 from pathlib import Path
 
-from common import (setup_ddp, is_main_process, train_loop, build_model_scratch)
+from common import (setup_ddp, is_main_process, train_loop, build_model_scratch,
+                    get_output_dir)
 
 
 def main():
@@ -54,7 +55,7 @@ def main():
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     is_main = is_main_process(rank)
-    output_dir = Path('runs') / args.exp_name
+    output_dir = get_output_dir(args.dataset, args.exp_name)
     if is_main:
         (output_dir / 'checkpoints').mkdir(parents=True, exist_ok=True)
         with open(output_dir / 'config.json', 'w') as f:

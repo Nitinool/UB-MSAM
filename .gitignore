@@ -17,4 +17,8 @@ baseline/dataset_BUSI/eval_bibm_*.ipynb
 baseline/dataset_BUSI/eval_*_run*.ipynb
 
 # 实验输出目录 (训练 log / ckpt / tensorboard)
+# BUSI 用 runs/, 其他数据集用 <DATASET>_runs/
 runs/
+ISIC_runs/
+CVC_runs/
+Kvasir_runs/

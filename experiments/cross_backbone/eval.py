@@ -33,7 +33,7 @@ from tqdm import tqdm
 # 让脚本能直接 import common
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (DATASET_ROOTS, SegDataset, build_model_scratch, build_model_pretrained,
-                    calculate_metrics)
+                    calculate_metrics, get_runs_dir)
 
 
 def main():

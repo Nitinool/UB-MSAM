@@ -26,6 +26,24 @@ DATASET_ROOTS = {
 }
 
 
+def get_runs_dir(dataset):
+    """根据 dataset 名返回对应的 runs 目录.
+    BUSI  → runs/        (保持原样, 向后兼容)
+    ISIC  → ISIC_runs/
+    CVC   → CVC_runs/
+    Kvasir→ Kvasir_runs/
+    """
+    if dataset == 'BUSI':
+        return Path('runs')
+    else:
+        return Path(f'{dataset}_runs')
+
+
+def get_output_dir(dataset, exp_name):
+    """训练输出目录: <runs_dir>/<exp_name>/"""
+    return get_runs_dir(dataset) / exp_name
+
+
 class SegDataset(Dataset):
     """通用分割数据集. 目录结构 (与 SAM2 训练一致):
         root/
