@@ -111,7 +111,9 @@ def build_model_pretrained(backbone, img_size):
         return smp.Unet(encoder_name='resnet34', encoder_weights='imagenet',
                         in_channels=3, classes=1)
     elif backbone == 'swin_unetr':
-        return smp.Unet(encoder_name='tu-swinv2_base_img224', encoder_weights='imagenet',
+        # timm 1.0.x 里的 SwinV2-Base 标准名, ImageNet 预训练
+        # (SwinV2 支持任意输入尺寸, 1024 上窗口自适应, 显存吃紧可换 swinv2_tiny_window8_256)
+        return smp.Unet(encoder_name='tu-swinv2_base_window8_256', encoder_weights='imagenet',
                         in_channels=3, classes=1)
     raise ValueError(f"Unknown backbone: {backbone}")
 
