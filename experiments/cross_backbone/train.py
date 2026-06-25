@@ -133,14 +133,25 @@ def build_model(backbone: str, img_size: int):
         )
     elif backbone == 'swin_unetr':
         from monai.networks.nets import SwinUNETR
-        return SwinUNETR(
-            img_size=(img_size, img_size),
-            in_channels=3,
-            out_channels=1,
-            spatial_dims=2,
-            feature_size=24,
-            use_v2=True,
-        )
+        # 新版 MONAI 移除了 img_size 参数, 用 use_v2=True 走新版 SwinV2 backbone
+        try:
+            return SwinUNETR(
+                in_channels=3,
+                out_channels=1,
+                spatial_dims=2,
+                feature_size=24,
+                use_v2=True,
+            )
+        except TypeError:
+            # 旧版 MONAI 仍然需要 img_size
+            return SwinUNETR(
+                img_size=(img_size, img_size),
+                in_channels=3,
+                out_channels=1,
+                spatial_dims=2,
+                feature_size=24,
+                use_v2=True,
+            )
     else:
         raise ValueError(f"Unknown backbone: {backbone}")
 
