@@ -186,8 +186,17 @@ def dice_loss(pred_logits, gt_mask, eps=1.0):
     return (1 - (2 * inter + eps) / (union + eps)).mean()
 
 
-def compute_loss(pred_logits, gt_mask, use_ubl: bool, ubl_weight: float = 2.0):
-    bce = F.binary_cross_entropy_with_logits(pred_logits, gt_mask)
+def compute_loss(pred_logits, gt_mask, use_ubl: bool, ubl_weight: float = 2.0, pos_weight: float = 7.0):
+    """组合损失: weighted BCE + Dice (+ U-BLoss)
+
+    Args:
+        pos_weight: BCE 中前景像素的权重, 用于对抗类别不平衡
+                    (BUSI 前景约 14%, 故 pos_weight ≈ 1/0.14 ≈ 7)
+    """
+    # 加 pos_weight 的 BCE: 让前景像素的 loss 权重高 7 倍
+    # BCEWithLogitsLoss 内部对前景和背景分别加权
+    pw = torch.tensor([pos_weight], device=pred_logits.device, dtype=pred_logits.dtype)
+    bce = F.binary_cross_entropy_with_logits(pred_logits, gt_mask, pos_weight=pw)
     dice = dice_loss(pred_logits, gt_mask)
     loss = bce + dice
     if use_ubl:
@@ -210,8 +219,8 @@ def main():
         default='/home/zhengsongming/jupyterworkspace/datasets/BUSI_for_SAM2',
     )
     parser.add_argument('--batch-size', type=int, default=4, help='per-GPU batch size')
-    parser.add_argument('--epochs', type=int, default=50)
-    parser.add_argument('--lr', type=float, default=1e-4)
+    parser.add_argument('--epochs', type=int, default=150)  # 50 → 150, from-scratch U-Net 需要更多 epoch
+    parser.add_argument('--lr', type=float, default=1e-3)   # 1e-4 → 1e-3, 原 lr 太低训练不收敛
     parser.add_argument('--weight-decay', type=float, default=0.01)
     parser.add_argument('--size', type=int, default=1024)
     parser.add_argument('--num-workers', type=int, default=4)
@@ -278,7 +287,17 @@ def main():
         model = DDP(model, device_ids=[local_rank], output_device=local_rank)
 
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
+    # 用 SequentialLR 实现 warmup + cosine: 前 5 epoch 线性升温到 lr, 之后 cosine 衰减到 0
+    warmup_epochs = max(1, args.epochs // 10)  # 默认前 10% epoch 用于 warmup
+    from torch.optim.lr_scheduler import LinearLR, SequentialLR, CosineAnnealingLR
+    scheduler = SequentialLR(
+        optimizer,
+        schedulers=[
+            LinearLR(optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_epochs),
+            CosineAnnealingLR(optimizer, T_max=args.epochs - warmup_epochs),
+        ],
+        milestones=[warmup_epochs],
+    )
 
     # === log file (只在 rank 0 写) ===
     if is_main:
