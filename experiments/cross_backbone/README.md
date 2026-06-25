@@ -7,15 +7,20 @@
 
 ## 📦 依赖
 
-只需要装一个：
 ```bash
-pip install monai
+pip install segmentation_models_pytorch timm einops
 ```
 
-MONAI 内置 UNet 和 SwinUNETR 实现。我们用 MONAI 是为了：
-- ✅ 一行代码就能拿到 SOTA-quality 的实现
-- ✅ 同一个接口跑两种 backbone
-- ✅ 论文里写法："U-Net (MONAI implementation)"
+- `segmentation_models_pytorch` (smp) —— U-Net decoder + 各种 ImageNet 预训练 encoder
+- `timm` —— smp 通过 timm 加载 SwinV2 等 encoder
+- `einops` —— smp/timm 的 tensor 操作依赖
+
+模型架构：
+- `unet` → smp.Unet(encoder=ResNet-34, weights=ImageNet)
+- `swin_unetr` → smp.Unet(encoder=SwinV2-Base, weights=ImageNet)
+
+两个 backbone 都用 ImageNet 预训练 encoder，公平对比。论文里描述为
+"U-Net (ResNet-34, ImageNet pre-trained)" 和 "Swin-UNet (SwinV2-Base, ImageNet pre-trained)"。
 
 ---
 
@@ -139,17 +144,19 @@ CKPT_PATH = '/home/zhengsongming/jupyterworkspace/UB-MSAM/runs/bibm_e3_unet_base
 
 ---
 
-## ⚙️ 训练超参（已写在 train.py 默认值）
+## ⚙️ 训练超参（已写在 train.py 默认值，针对预训练 encoder 调优）
 
-| 超参 | 值 |
-|---|---|
-| batch_size | 4 |
-| lr | 1e-4 (cosine decay) |
-| epochs | 50 |
-| weight_decay | 0.01 |
-| size | 1024 |
-| ubl_weight | 2.0 |
-| seed | 42 |
+| 超参 | 值 | 说明 |
+|---|---|---|
+| batch_size | 8 | per-GPU |
+| lr | 1e-4 | 小 lr 保护 ImageNet 预训练特征 |
+| epochs | 100 | 预训练 encoder 收敛快 |
+| weight_decay | 0.01 | |
+| size | 1024 | |
+| ubl_weight | 2.0 | |
+| pos_weight (BCE) | 7.0 | 对抗前景 14% 类别不平衡 |
+| seed | 42 | |
+| scheduler | warmup(10%) + cosine | |
 
 如需调，直接命令行 override，例如：
 ```bash

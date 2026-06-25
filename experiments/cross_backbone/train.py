@@ -121,37 +121,31 @@ class BUSIDataset(Dataset):
 # 模型构建
 # =============================================================================
 def build_model(backbone: str, img_size: int):
+    """构建分割模型. 用 segmentation_models_pytorch (smp) + ImageNet 预训练 encoder.
+
+    两个 backbone 都是 U-Net decoder + 不同 encoder:
+      - unet       → ResNet-34 encoder
+      - swin_unetr → SwinV2-Base encoder
+    论文里描述为 "U-Net (ResNet-34, ImageNet pre-trained)" 和
+    "Swin-UNet (SwinV2-Base, ImageNet pre-trained)".
+    """
+    import segmentation_models_pytorch as smp
+
     if backbone == 'unet':
-        from monai.networks.nets import UNet
-        return UNet(
-            spatial_dims=2,
+        return smp.Unet(
+            encoder_name='resnet34',
+            encoder_weights='imagenet',
             in_channels=3,
-            out_channels=1,
-            channels=(32, 64, 128, 256, 512),
-            strides=(2, 2, 2, 2),
-            num_res_units=2,
+            classes=1,
         )
     elif backbone == 'swin_unetr':
-        from monai.networks.nets import SwinUNETR
-        # 新版 MONAI 移除了 img_size 参数, 用 use_v2=True 走新版 SwinV2 backbone
-        try:
-            return SwinUNETR(
-                in_channels=3,
-                out_channels=1,
-                spatial_dims=2,
-                feature_size=24,
-                use_v2=True,
-            )
-        except TypeError:
-            # 旧版 MONAI 仍然需要 img_size
-            return SwinUNETR(
-                img_size=(img_size, img_size),
-                in_channels=3,
-                out_channels=1,
-                spatial_dims=2,
-                feature_size=24,
-                use_v2=True,
-            )
+        # tu- 前缀 = timm-universal, 加载 timm 的 SwinV2 with ImageNet 预训练
+        return smp.Unet(
+            encoder_name='tu-swinv2_base_img224',
+            encoder_weights='imagenet',
+            in_channels=3,
+            classes=1,
+        )
     else:
         raise ValueError(f"Unknown backbone: {backbone}")
 
@@ -218,9 +212,9 @@ def main():
         '--dataset-root',
         default='/home/zhengsongming/jupyterworkspace/datasets/BUSI_for_SAM2',
     )
-    parser.add_argument('--batch-size', type=int, default=4, help='per-GPU batch size')
-    parser.add_argument('--epochs', type=int, default=150)  # 50 → 150, from-scratch U-Net 需要更多 epoch
-    parser.add_argument('--lr', type=float, default=1e-3)   # 1e-4 → 1e-3, 原 lr 太低训练不收敛
+    parser.add_argument('--batch-size', type=int, default=8, help='per-GPU batch size')
+    parser.add_argument('--epochs', type=int, default=100)  # 预训练 encoder 收敛快, 100 epoch 够
+    parser.add_argument('--lr', type=float, default=1e-4)   # 预训练 encoder 用小 lr, 避免破坏 ImageNet 特征
     parser.add_argument('--weight-decay', type=float, default=0.01)
     parser.add_argument('--size', type=int, default=1024)
     parser.add_argument('--num-workers', type=int, default=4)
