@@ -269,7 +269,7 @@ def train_loop(model, build_fn, args, device, use_ddp, rank, world_size, output_
         model.train()
         if sampler is not None:
             sampler.set_epoch(epoch)
-        losses, bce_losses, dice_losses = [], []
+        losses, bce_losses, dice_losses = [], [], []
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs}") if is_main else train_loader
         for img, gt in pbar:
