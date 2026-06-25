@@ -86,7 +86,7 @@ def main():
     runs_dir = get_runs_dir(args.dataset)
     dataset_root = args.dataset_root or DATASET_ROOTS[args.dataset]
 
-    # 扫描所有含 checkpoint.pt 的子目录
+    # 扫描所有含 ckpt 的子目录 (优先 best_checkpoint.pt, 没有就用 checkpoint.pt)
     ckpts = []
     if not runs_dir.exists():
         print(f"Directory not found: {runs_dir}/")
@@ -96,26 +96,30 @@ def main():
             continue
         if args.filter and args.filter not in sub.name:
             continue
-        ckpt_path = sub / 'checkpoints' / 'checkpoint.pt'
-        if ckpt_path.exists():
-            ckpts.append((sub.name, ckpt_path))
+        best_path = sub / 'checkpoints' / 'best_checkpoint.pt'
+        last_path = sub / 'checkpoints' / 'checkpoint.pt'
+        if best_path.exists():
+            ckpts.append((sub.name, best_path, 'best'))
+        elif last_path.exists():
+            ckpts.append((sub.name, last_path, 'last'))
 
     if not ckpts:
         print(f"No checkpoints found in {runs_dir}/" + (f" matching '{args.filter}'" if args.filter else ""))
         return
 
     print(f"Found {len(ckpts)} checkpoints in {runs_dir}/:")
-    for name, _ in ckpts:
-        print(f"  - {name}")
+    for name, _, kind in ckpts:
+        print(f"  - {name} ({kind})")
     print()
 
     # 逐个评测
     summary = []
-    for exp_name, ckpt_path in ckpts:
-        print(f"\n=== Evaluating: {exp_name} ===")
+    for exp_name, ckpt_path, kind in ckpts:
+        print(f"\n=== Evaluating: {exp_name} ({kind}) ===")
         try:
             metrics = evaluate_ckpt(ckpt_path, dataset_root, args.split, args.size)
             metrics['exp_name'] = exp_name
+            metrics['ckpt_kind'] = kind
             summary.append(metrics)
             print(f"  backbone={metrics['backbone']} | model={metrics['model_type']} | "
                   f"use_ubl={metrics['use_ubl']} | epoch={metrics['epoch']}")
@@ -124,7 +128,7 @@ def main():
                   f"95HD={metrics['hd95_mean']:.2f}±{metrics['hd95_std']:.2f}")
         except Exception as e:
             print(f"  FAILED: {type(e).__name__}: {e}")
-            summary.append({'exp_name': exp_name, 'error': f"{type(e).__name__}: {e}"})
+            summary.append({'exp_name': exp_name, 'ckpt_kind': kind, 'error': f"{type(e).__name__}: {e}"})
 
     # 输出汇总表
     df = pd.DataFrame(summary)
@@ -132,7 +136,7 @@ def main():
     print(f'=== {args.dataset} Evaluation Summary ({len(df)} experiments) ===')
     print('=' * 110)
     # 只显示关键列, 数值保留 4 位
-    display_cols = ['exp_name', 'backbone', 'model_type', 'use_ubl',
+    display_cols = ['exp_name', 'ckpt_kind', 'backbone', 'model_type', 'use_ubl',
                     'dice_mean', 'iou_mean', 'hd95_mean']
     available_cols = [c for c in display_cols if c in df.columns]
     df_display = df[available_cols].copy()

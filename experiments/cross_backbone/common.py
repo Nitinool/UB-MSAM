@@ -278,10 +278,28 @@ def train_loop(model, build_fn, args, device, use_ddp, rank, world_size, output_
 
     is_main = is_main_process(rank)
 
-    # 数据集
+    # 数据集: 从 train.txt 切 90/10, 90% 训练 + 10% 内部 val (early stopping 用)
+    # val.txt 保持不动作为 held-out test (评测用, 不参与 ckpt 选择)
     dataset_root = args.dataset_root or DATASET_ROOTS[args.dataset]
-    train_set = SegDataset(dataset_root, split='train', size=args.size,
-                           augment=True, verbose=is_main)
+    full_train_aug = SegDataset(dataset_root, split='train', size=args.size,
+                                augment=True, verbose=False)
+    full_train_noaug = SegDataset(dataset_root, split='train', size=args.size,
+                                  augment=False, verbose=False)
+
+    from torch.utils.data import Subset
+    n_total = len(full_train_aug)
+    n_val = max(1, n_total // 10)
+    n_train = n_total - n_val
+    indices = list(range(n_total))
+    rng = np.random.RandomState(args.seed)
+    rng.shuffle(indices)
+    val_indices = indices[:n_val]
+    train_indices = indices[n_val:]
+    train_set = Subset(full_train_aug, train_indices)
+    internal_val_set = Subset(full_train_noaug, val_indices)
+    if is_main:
+        print(f"Dataset: {args.dataset} @ {dataset_root}")
+        print(f"Train/Val split: {n_train}/{n_val} (internal val for early stopping, val.txt 仍是 held-out test)")
 
     if use_ddp:
         local_rank = int(os.environ['LOCAL_RANK'])
@@ -292,6 +310,9 @@ def train_loop(model, build_fn, args, device, use_ddp, rank, world_size, output_
         sampler = None
         train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True,
                                   num_workers=args.num_workers, pin_memory=True, drop_last=True)
+    # 内部 val loader (不 drop_last, 不 shuffle)
+    val_loader = DataLoader(internal_val_set, batch_size=args.batch_size, shuffle=False,
+                            num_workers=args.num_workers, pin_memory=True)
 
     # 模型
     model = build_fn(args.backbone, args.size).to(device)
@@ -326,6 +347,10 @@ def train_loop(model, build_fn, args, device, use_ddp, rank, world_size, output_
     log(f"Args: {json.dumps(vars(args), indent=2)}")
     log(f"DDP: {use_ddp}, world_size: {world_size}, effective batch: {args.batch_size * world_size}")
     log(f"Trainable params: {n_params / 1e6:.2f} M")
+    log(f"Early stopping: 按 internal val dice 保存 best_checkpoint.pt")
+
+    best_val_dice = -1.0
+    best_epoch = -1
 
     for epoch in range(args.epochs):
         model.train()
@@ -355,17 +380,45 @@ def train_loop(model, build_fn, args, device, use_ddp, rank, world_size, output_
             loss_tensor = torch.tensor(mean_loss, device=device)
             mean_loss = reduce_mean(loss_tensor, world_size).item()
 
+        # === 内部 val 评测: 算 dice, 用于 early stopping ===
+        model.eval()
+        val_dices = []
+        with torch.no_grad():
+            for img, gt in val_loader:
+                img, gt = img.to(device), gt.to(device)
+                pred = model(img)
+                pred_bin = (torch.sigmoid(pred) > 0.5).float()
+                inter = (pred_bin * gt).sum(dim=(2, 3))
+                union = pred_bin.sum(dim=(2, 3)) + gt.sum(dim=(2, 3))
+                dice = (2 * inter + 1.0) / (union + 1.0)  # [N, 1]
+                val_dices.extend(dice.cpu().numpy().flatten().tolist())
+        val_dice = float(np.mean(val_dices)) if val_dices else 0.0
+        if use_ddp:
+            vd = torch.tensor(val_dice, device=device)
+            val_dice = reduce_mean(vd, world_size).item()
+
         msg = (f"Epoch {epoch+1}/{args.epochs} | loss={mean_loss:.4f} | "
                f"bce={np.mean(bce_losses):.4f} | dice={np.mean(dice_losses):.4f} | "
-               f"lr={optimizer.param_groups[0]['lr']:.2e}")
+               f"val_dice={val_dice:.4f} | lr={optimizer.param_groups[0]['lr']:.2e}")
         log(msg)
 
         if is_main:
-            ckpt_path = output_dir / 'checkpoints' / 'checkpoint.pt'
             state_dict = model.module.state_dict() if use_ddp else model.state_dict()
+            # 始终保存最后一个 ckpt (向后兼容)
+            ckpt_path = output_dir / 'checkpoints' / 'checkpoint.pt'
             torch.save({'epoch': epoch + 1, 'model': state_dict, 'args': vars(args)}, ckpt_path)
+            # 如果是最佳 val dice, 保存 best_checkpoint.pt
+            if val_dice > best_val_dice:
+                best_val_dice = val_dice
+                best_epoch = epoch + 1
+                best_path = output_dir / 'checkpoints' / 'best_checkpoint.pt'
+                torch.save({'epoch': epoch + 1, 'model': state_dict, 'args': vars(args),
+                            'val_dice': val_dice}, best_path)
+                log(f"  >> New best val_dice={val_dice:.4f} @ epoch {epoch+1}, saved best_checkpoint.pt")
 
-    log(f"=== Training done. Final ckpt: {output_dir / 'checkpoints' / 'checkpoint.pt'} ===")
+    log(f"=== Training done. Best val_dice={best_val_dice:.4f} @ epoch {best_epoch} ===")
+    log(f"    best_checkpoint.pt: {output_dir / 'checkpoints' / 'best_checkpoint.pt'}")
+    log(f"    checkpoint.pt (last): {output_dir / 'checkpoints' / 'checkpoint.pt'}")
     if is_main:
         log_file.close()
     cleanup_ddp()
